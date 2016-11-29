@@ -1,21 +1,25 @@
+#!/usr/bin/env python3
+
+import argparse
 from fractions import Fraction
 
-from migen.fhdl.std import *
-from migen.genlib.resetsync import AsyncResetSynchronizer
-from migen.actorlib.fifo import SyncFIFO
+from litex.gen import *
+from litex.gen.genlib.resetsync import AsyncResetSynchronizer
+from litex.boards.platforms import minispartan6
 
-from misoclib.mem.sdram.module import AS4C16M16
-from misoclib.mem.sdram.phy import gensdrphy
-from misoclib.mem.sdram.core.lasmicon import LASMIconSettings
-from misoclib.soc.sdram import SDRAMSoC
+from litex.soc.integration.soc_sdram import *
+from litex.soc.integration.builder import *
 
-from liteusb.common import *
-from liteusb.phy.ft245 import FT245PHY
-from liteusb.core import LiteUSBCore
-from liteusb.frontend.uart import LiteUSBUART
-from liteusb.frontend.wishbone import LiteUSBWishboneBridge
+from litedram.modules import AS4C16M16
+from litedram.phy import GENSDRPHY
 
-from misoclib.com.gpio import GPIOOut
+from gateware import dna
+
+
+def csr_map_update(csr_map, csr_peripherals):
+    csr_map.update(dict((n, v)
+        for v, n in enumerate(csr_peripherals, start=max(csr_map.values()) + 1)))
+
 
 class _CRG(Module):
     def __init__(self, platform, clk_freq):
@@ -54,7 +58,7 @@ class _CRG(Module):
                                      p_CLKOUT1_PHASE=0., p_CLKOUT1_DIVIDE=p//1,
                                      p_CLKOUT2_PHASE=0., p_CLKOUT2_DIVIDE=p//1,
                                      p_CLKOUT3_PHASE=0., p_CLKOUT3_DIVIDE=p//1,
-                                     p_CLKOUT4_PHASE=0., p_CLKOUT4_DIVIDE=p//1,  # sys
+                                     p_CLKOUT4_PHASE=0., p_CLKOUT4_DIVIDE=p//1,    # sys
                                      p_CLKOUT5_PHASE=270., p_CLKOUT5_DIVIDE=p//1,  # sys_ps
         )
         self.specials += Instance("BUFG", i_I=pll[4], o_O=self.cd_sys.clk)
@@ -68,63 +72,42 @@ class _CRG(Module):
                                   o_Q=platform.request("sdram_clock"))
 
 
-class BaseSoC(SDRAMSoC):
-    default_platform = "minispartan6"
+class BaseSoC(SoCSDRAM):
+    csr_peripherals = (
+        "dna",
+    )
+    csr_map_update(SoCSDRAM.csr_map, csr_peripherals)
 
-    def __init__(self, platform, sdram_controller_settings=LASMIconSettings(), **kwargs):
+    def __init__(self, **kwargs):
         clk_freq = 80*1000000
-        SDRAMSoC.__init__(self, platform, clk_freq,
+        platform = minispartan6.Platform(device="xc6slx25")
+        SoCSDRAM.__init__(self, platform, clk_freq,
                           integrated_rom_size=0x8000,
-                          sdram_controller_settings=sdram_controller_settings,
                           **kwargs)
 
         self.submodules.crg = _CRG(platform, clk_freq)
+        self.submodules.dna = dna.DNA()
 
         if not self.integrated_main_ram_size:
-            self.submodules.sdrphy = gensdrphy.GENSDRPHY(platform.request("sdram"),
-                                                         AS4C16M16(clk_freq))
-            self.register_sdram_phy(self.sdrphy)
+            self.submodules.sdrphy = GENSDRPHY(platform.request("sdram"))
+            sdram_module = AS4C16M16(clk_freq, "1:1")
+            self.register_sdram(self.sdrphy,
+                                sdram_module.geom_settings,
+                                sdram_module.timing_settings)
 
 
-class USBSoC(BaseSoC):
-    csr_map = {
-        "usb_dma": 16,
-    }
-    csr_map.update(BaseSoC.csr_map)
+def main():
+    parser = argparse.ArgumentParser(description="MiniSpartan6 LiteX SoC")
+    builder_args(parser)
+    soc_sdram_args(parser)
+    parser.add_argument("--nocompile-gateware", action="store_true")
+    args = parser.parse_args()
 
-    usb_map = {
-        "uart":   0,
-        "dma":    1,
-        "bridge": 2
-    }
+    soc = BaseSoC(**soc_sdram_argdict(args))
+    builder = Builder(soc, output_dir="build",
+                      compile_gateware=not args.nocompile_gateware,
+                      csr_csv="test/csr.csv")
+    vns = builder.build()
 
-    def __init__(self, platform, **kwargs):
-        BaseSoC.__init__(self, platform, with_uart=False, **kwargs)
-
-        self.submodules.usb_phy = FT245PHY(platform.request("usb_fifo"), self.clk_freq)
-        self.submodules.usb_core = LiteUSBCore(self.usb_phy, self.clk_freq, with_crc=False)
-
-        # UART
-        usb_uart_port = self.usb_core.crossbar.get_port(self.usb_map["uart"])
-        self.submodules.uart = LiteUSBUART(usb_uart_port)
-
-        # DMA
-        usb_dma_port = self.usb_core.crossbar.get_port(self.usb_map["dma"])
-        usb_dma_loopback_fifo = SyncFIFO(user_description(8), 1024, buffered=True)
-        self.submodules += usb_dma_loopback_fifo
-        self.comb += [
-            usb_dma_port.source.connect(usb_dma_loopback_fifo.sink),
-            usb_dma_loopback_fifo.source.connect(usb_dma_port.sink)
-        ]
-
-        # Wishbone Bridge
-        usb_bridge_port = self.usb_core.crossbar.get_port(self.usb_map["bridge"])
-        usb_bridge = LiteUSBWishboneBridge(usb_bridge_port, self.clk_freq)
-        self.submodules += usb_bridge
-        self.add_wb_master(usb_bridge.wishbone)
-
-        # Leds
-        leds = Cat(iter([platform.request("user_led", i) for i in range(8)]))
-        self.submodules.leds = GPIOOut(leds)
-
-default_subtarget = BaseSoC
+if __name__ == "__main__":
+    main()
