@@ -25,7 +25,7 @@ static void ci_help(void)
 	puts("mdio_status - show mdio status");
 #endif
 #ifdef CSR_GENERATOR_BASE
-	puts("bist        - DDR3 bist");
+	puts("bist        - SDRAM BIST");
 #endif
 	help_debug();
 }

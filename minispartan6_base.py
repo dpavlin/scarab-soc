@@ -12,6 +12,9 @@ from litex.soc.integration.builder import *
 
 from litedram.modules import AS4C16M16
 from litedram.phy import GENSDRPHY
+from litedram.frontend.bist import LiteDRAMBISTGenerator
+from litedram.frontend.bist import LiteDRAMBISTChecker
+from litedram.core.controller import ControllerSettings
 
 from gateware import dna
 
@@ -75,10 +78,14 @@ class _CRG(Module):
 class BaseSoC(SoCSDRAM):
     csr_peripherals = (
         "dna",
+        "generator",
+        "checker",
     )
     csr_map_update(SoCSDRAM.csr_map, csr_peripherals)
 
-    def __init__(self, **kwargs):
+    def __init__(self,
+        with_sdram_bist=True, bist_random=True,
+        **kwargs):
         clk_freq = 80*1000000
         platform = minispartan6.Platform(device="xc6slx25")
         SoCSDRAM.__init__(self, platform, clk_freq,
@@ -88,12 +95,22 @@ class BaseSoC(SoCSDRAM):
         self.submodules.crg = _CRG(platform, clk_freq)
         self.submodules.dna = dna.DNA()
 
+        # sdram
         if not self.integrated_main_ram_size:
             self.submodules.sdrphy = GENSDRPHY(platform.request("sdram"))
             sdram_module = AS4C16M16(clk_freq, "1:1")
             self.register_sdram(self.sdrphy,
                                 sdram_module.geom_settings,
-                                sdram_module.timing_settings)
+                                sdram_module.timing_settings,
+                                controller_settings=ControllerSettings(cmd_buffer_depth=1))
+
+        # sdram bist
+        if with_sdram_bist:
+            generator_user_port = self.sdram.crossbar.get_port(mode="write")
+            self.submodules.generator = LiteDRAMBISTGenerator(generator_user_port, random=bist_random)
+
+            checker_user_port = self.sdram.crossbar.get_port(mode="read")
+            self.submodules.checker = LiteDRAMBISTChecker(checker_user_port, random=bist_random)
 
 
 def main():
