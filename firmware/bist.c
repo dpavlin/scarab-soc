@@ -33,7 +33,7 @@ void bist(void) {
 			generator_reset_write(0);
 			generator_base_write(0x10000);
 			generator_length_write((test_size*8)/16);
-
+#if 0
 			generator_shoot_write(1);
 			while(generator_done_read() == 0);
 
@@ -53,6 +53,7 @@ void bist(void) {
 
 			// delay
 			busy_wait(10);
+#endif
 	}
 
 }

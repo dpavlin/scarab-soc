@@ -13,6 +13,6 @@ firmware:
 	cd firmware && make clean all
 
 load-firmware:
-	litex_term --kernel firmware/firmware.bin COM17
+	litex_term --kernel firmware/firmware.bin /dev/serial/by-id/usb-FTDI_Dual_RS232-HS-if01-port0
 
 .PHONY: load firmware load-firmware
